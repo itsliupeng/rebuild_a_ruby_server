@@ -1,22 +1,25 @@
 require 'socket'
 require 'http/parser'
+require 'stringio'
 
 class Tube
-  def initialize(port)
+  def initialize(port, app)
     @server = TCPServer.new(port)
+    @app = app
   end
 
   def start
     loop do
       socket = @server.accept
-      connection = Connection.new(socket)
+      connection = Connection.new(socket, @app)
       connection.process
     end
   end
 
   class Connection
-    def initialize(socket)
+    def initialize(socket, app)
       @socket = socket
+      @app = app
       @parser = Http::Parser.new(self)
     end
 
@@ -31,19 +34,63 @@ class Tube
       puts "#{@parser.http_method} #{@parser.request_path}"
       puts " " + @parser.headers.inspect
       puts
-      send_response
+
+      env = {}
+      @parser.headers.each_pair do |name, value|
+        # User-Agent => HTTP_USER_AGENT
+        name = "HTTP_" + name.upcase.tr("-", "_")
+        env[name] = value
+      end
+      env["PATH_INFO"] = @parser.request_path
+      env["REQUEST_METHOD"] = @parser.http_method
+      env["rack.input"] = StringIO.new # we not post with data
+
+      send_response(env)
     end
 
-    def send_response
-      @socket.write "HTTP/1.1 200 OK\r\n"
+    REASONS = {
+      200 => "OK",
+      404 => "Not found"
+    }
+    def send_response(env)
+      status, headers, body = @app.call(env)
+      reason = REASONS[status]
+
+      @socket.write "HTTP/1.1 #{status} #{reason}\r\n"
+      headers.each_pair do |name, value|
+        @socket.write "#{name}: #{value}\r\n"
+      end
       @socket.write "\r\n"
-      @socket.write "hello\r\n"
+      body.each do |chunk|
+        @socket.write chunk
+      end
+      body.close if body.respond_to? :close
 
       @socket.close
     end
   end
+
+  class Builder
+    attr_reader :app
+
+    def run(app)
+      @app = app
+    end
+
+    def self.parse_file(file)
+      content = File.read(file)
+      builder = self.new
+      builder.instance_eval(content)
+      builder.app
+    end
+ end
 end
 
-server = Tube.new(3000)
+
+
+
+
+app = Tube::Builder.parse_file("config.ru")
+server = Tube.new(3000, app)
 puts "Plugging tube into port 3000"
 server.start
