@@ -29,18 +29,23 @@ class Tube
     end
   end
 
-  class Connection
-    def initialize(socket, app)
-      @socket = socket
-      @app = app
+  def start_em
+    EM.run do
+      EM.start_server "localhost", 3000, EMConnection do |connection|
+        connection.app = @app
+      end
+    end
+  end
+
+  class EMConnection < EM::Connection
+    attr_accessor :app
+
+    def post_init
       @parser = Http::Parser.new(self)
     end
 
-    def process
-      until @socket.closed? or @socket.eof?
-        data = @socket.readpartial(1024)
-        @parser << data
-      end
+    def receive_data(data)
+      @parser << data
     end
 
     def on_message_complete
@@ -65,21 +70,22 @@ class Tube
       200 => "OK",
       404 => "Not found"
     }
+
     def send_response(env)
       status, headers, body = @app.call(env)
       reason = REASONS[status]
 
-      @socket.write "HTTP/1.1 #{status} #{reason}\r\n"
+      send_data "HTTP/1.1 #{status} #{reason}\r\n"
       headers.each_pair do |name, value|
-        @socket.write "#{name}: #{value}\r\n"
+        send_data "#{name}: #{value}\r\n"
       end
-      @socket.write "\r\n"
+      send_data "\r\n"
       body.each do |chunk|
-        @socket.write chunk
+        send_data chunk
       end
       body.close if body.respond_to? :close
 
-      @socket.close
+      close_connection_after_writing
     end
   end
 
@@ -103,4 +109,4 @@ end
 app = Tube::Builder.parse_file("config.ru")
 server = Tube.new(3000, app)
 puts "Plugging tube into port 3000"
-server.prefork(3)
+server.start_em
